@@ -104,15 +104,13 @@ export const MigrationWizard: React.FC = () => {
 
   const filteredPreviewTracks = useMemo(() => {
     const q = searchFilter.trim().toLowerCase();
-    if (!q) return state.tracks.slice(0, 250);
-    return state.tracks
-      .filter(
-        (t) =>
-          t.title.toLowerCase().includes(q) ||
-          t.artist.toLowerCase().includes(q) ||
-          t.album.toLowerCase().includes(q)
-      )
-      .slice(0, 250);
+    if (!q) return state.tracks;
+    return state.tracks.filter(
+      (t) =>
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        t.album.toLowerCase().includes(q)
+    );
   }, [state.tracks, searchFilter]);
 
   const hasValidCookie = state.ytCookie.includes('__Secure-3PAPISID');
@@ -355,8 +353,8 @@ export const MigrationWizard: React.FC = () => {
               {filteredPreviewTracks.map((track, idx) => (
                 <div
                   key={track.spotify_uri + '-' + track.index}
-                  className="track-row"
-                  style={{ animationDelay: `${Math.min(idx, 8) * 35}ms` }}
+                  className={`track-row ${idx < 12 ? 'track-row-enter' : ''}`}
+                  style={idx < 12 ? { animationDelay: `${idx * 30}ms` } : undefined}
                 >
                   <span className="track-num">{track.index + 1}</span>
                   <div className="track-main">
@@ -622,7 +620,7 @@ export const MigrationWizard: React.FC = () => {
             </div>
 
             <div className="track-list-viewport">
-              {state.tracks.slice(0, 300).map((track) => {
+              {state.tracks.map((track) => {
                 const rec = state.uploadState?.track_records[track.index];
                 const status = rec?.status || 'pending';
                 const isCurrent = state.currentTrackIndex === track.index;

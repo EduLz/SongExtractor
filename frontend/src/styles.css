@@ -584,6 +584,11 @@ kbd,
   gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
+  content-visibility: auto;
+  contain-intrinsic-size: 0 54px;
+}
+
+.track-row-enter {
   opacity: 0;
   transform: translateY(6px);
   animation: rowFadeIn 220ms var(--ease-out) forwards;
