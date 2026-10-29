@@ -1,0 +1,53 @@
+# Carpeta de instrucciones y extras locales
+Extras/
+
+# Credenciales y configuración sensible
+.env
+.env.*
+!.env.example
+browser.json
+oauth.json
+headers_auth.json
+
+# Caché temporal local
+.cache
+.cache-*
+
+# Archivos de estado, datos extraídos y logs
+upload_state.json
+playlist_data.json
+*.log
+
+# Dependencias y compilación de Frontend (Node / Vite)
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.vercel/
+
+# Skills instaladas localmente por agentes
+.agents/
+.skills/
+skills-lock.json
+
+# Entornos virtuales y caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Archivos del sistema operativo e IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+.vercel
+.env*
+!.env.example
