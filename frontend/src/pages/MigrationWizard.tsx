@@ -26,6 +26,10 @@ export const MigrationWizard: React.FC = () => {
 
   const [isCookieModalOpen, setIsCookieModalOpen] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
+  const [summaryStatusFilter, setSummaryStatusFilter] = useState<
+    'all' | 'added' | 'low_confidence' | 'failed' | 'pending'
+  >('all');
+  const [summarySearch, setSummarySearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const stats = useMemo(() => {
@@ -112,6 +116,41 @@ export const MigrationWizard: React.FC = () => {
         t.album.toLowerCase().includes(q)
     );
   }, [state.tracks, searchFilter]);
+
+  const filteredSummaryTracks = useMemo(() => {
+    const records: Record<number, TrackMigrationRecord> = state.uploadState?.track_records || {};
+    const q = summarySearch.trim().toLowerCase();
+
+    return state.tracks.filter((t) => {
+      const rec = records[t.index];
+      const status = rec?.status || 'pending';
+
+      if (summaryStatusFilter === 'added' && status !== 'added' && status !== 'low_confidence') {
+        return false;
+      }
+      if (summaryStatusFilter === 'low_confidence' && status !== 'low_confidence') {
+        return false;
+      }
+      if (summaryStatusFilter === 'failed' && status !== 'failed') {
+        return false;
+      }
+      if (
+        summaryStatusFilter === 'pending' &&
+        status !== 'pending' &&
+        status !== 'searching'
+      ) {
+        return false;
+      }
+
+      if (!q) return true;
+      return (
+        t.title.toLowerCase().includes(q) ||
+        t.artist.toLowerCase().includes(q) ||
+        (rec?.matchedTitle && rec.matchedTitle.toLowerCase().includes(q)) ||
+        (rec?.matchedArtist && rec.matchedArtist.toLowerCase().includes(q))
+      );
+    });
+  }, [state.tracks, state.uploadState, summaryStatusFilter, summarySearch]);
 
   const hasValidCookie = state.ytCookie.includes('__Secure-3PAPISID');
   const isLargePlaylist = state.tracks.length > 190;
@@ -706,23 +745,216 @@ export const MigrationWizard: React.FC = () => {
             </div>
 
             <div className="kpi-grid">
-              <div className="kpi-box kpi-green">
+              <button
+                type="button"
+                className={`kpi-box kpi-interactive kpi-green ${
+                  summaryStatusFilter === 'added' ? 'is-selected' : ''
+                }`}
+                onClick={() =>
+                  setSummaryStatusFilter((prev) => (prev === 'added' ? 'all' : 'added'))
+                }
+              >
                 <span className="kpi-value">{stats.added.toLocaleString()}</span>
-                <span className="kpi-label">Canciones en tu playlist</span>
-              </div>
-              <div className="kpi-box kpi-amber">
+                <span className="kpi-label">Canciones añadidas</span>
+              </button>
+              <button
+                type="button"
+                className={`kpi-box kpi-interactive kpi-amber ${
+                  summaryStatusFilter === 'low_confidence' ? 'is-selected' : ''
+                }`}
+                onClick={() =>
+                  setSummaryStatusFilter((prev) =>
+                    prev === 'low_confidence' ? 'all' : 'low_confidence'
+                  )
+                }
+              >
                 <span className="kpi-value">{stats.lowConf.toLocaleString()}</span>
                 <span className="kpi-label">Versiones similares</span>
-              </div>
-              <div className="kpi-box kpi-red">
+              </button>
+              <button
+                type="button"
+                className={`kpi-box kpi-interactive kpi-red ${
+                  summaryStatusFilter === 'failed' ? 'is-selected' : ''
+                }`}
+                onClick={() =>
+                  setSummaryStatusFilter((prev) => (prev === 'failed' ? 'all' : 'failed'))
+                }
+              >
                 <span className="kpi-value">{stats.failed.toLocaleString()}</span>
-                <span className="kpi-label">No encontradas</span>
-              </div>
-              <div className="kpi-box kpi-neutral">
+                <span className="kpi-label">No disponibles</span>
+              </button>
+              <button
+                type="button"
+                className={`kpi-box kpi-interactive kpi-neutral ${
+                  summaryStatusFilter === 'pending' ? 'is-selected' : ''
+                }`}
+                onClick={() =>
+                  setSummaryStatusFilter((prev) => (prev === 'pending' ? 'all' : 'pending'))
+                }
+              >
                 <span className="kpi-value">
                   {Math.max(0, stats.total - stats.processed).toLocaleString()}
                 </span>
-                <span className="kpi-label">Pendientes para otra sesión</span>
+                <span className="kpi-label">Pendientes</span>
+              </button>
+            </div>
+
+            <div className="summary-details-section">
+              <div className="summary-details-header">
+                <div>
+                  <h3>Detalle de canciones</h3>
+                  <p className="summary-details-sub">
+                    Revisa qué canciones se añadieron a tu playlist, cuáles usan una versión similar
+                    y cuáles no estuvieron disponibles.
+                  </p>
+                </div>
+              </div>
+
+              <div className="summary-filter-bar">
+                <div className="filter-pills" role="tablist" aria-label="Filtrar por resultado">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={summaryStatusFilter === 'all'}
+                    className={`filter-pill ${summaryStatusFilter === 'all' ? 'is-active' : ''}`}
+                    onClick={() => setSummaryStatusFilter('all')}
+                  >
+                    Todas ({stats.total.toLocaleString()})
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={summaryStatusFilter === 'added'}
+                    className={`filter-pill ${summaryStatusFilter === 'added' ? 'is-active' : ''}`}
+                    onClick={() => setSummaryStatusFilter('added')}
+                  >
+                    Añadidas ({stats.added.toLocaleString()})
+                  </button>
+                  {stats.lowConf > 0 && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={summaryStatusFilter === 'low_confidence'}
+                      className={`filter-pill ${
+                        summaryStatusFilter === 'low_confidence' ? 'is-active' : ''
+                      }`}
+                      onClick={() => setSummaryStatusFilter('low_confidence')}
+                    >
+                      Versión similar ({stats.lowConf.toLocaleString()})
+                    </button>
+                  )}
+                  {stats.failed > 0 && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={summaryStatusFilter === 'failed'}
+                      className={`filter-pill ${
+                        summaryStatusFilter === 'failed' ? 'is-active' : ''
+                      }`}
+                      onClick={() => setSummaryStatusFilter('failed')}
+                    >
+                      No disponibles ({stats.failed.toLocaleString()})
+                    </button>
+                  )}
+                  {stats.total - stats.processed > 0 && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={summaryStatusFilter === 'pending'}
+                      className={`filter-pill ${
+                        summaryStatusFilter === 'pending' ? 'is-active' : ''
+                      }`}
+                      onClick={() => setSummaryStatusFilter('pending')}
+                    >
+                      Pendientes ({Math.max(0, stats.total - stats.processed).toLocaleString()})
+                    </button>
+                  )}
+                </div>
+
+                <input
+                  type="search"
+                  className="text-input search-input"
+                  placeholder="Buscar canción o artista en el resultado..."
+                  value={summarySearch}
+                  onChange={(e) => setSummarySearch(e.target.value)}
+                />
+              </div>
+
+              <div className="track-list-viewport">
+                {filteredSummaryTracks.length === 0 ? (
+                  <div className="empty-filter-state">
+                    No hay canciones en esta categoría con el filtro actual.
+                  </div>
+                ) : (
+                  filteredSummaryTracks.map((track) => {
+                    const rec = state.uploadState?.track_records[track.index];
+                    const status = rec?.status || 'pending';
+                    const ytSearchUrl = `https://music.youtube.com/search?q=${encodeURIComponent(
+                      `${track.title} ${track.artist}`
+                    )}`;
+                    const ytWatchUrl = rec?.videoId
+                      ? `https://music.youtube.com/watch?v=${rec.videoId}`
+                      : null;
+
+                    return (
+                      <div
+                        key={track.spotify_uri + '-' + track.index}
+                        className={`track-row status-${status}`}
+                      >
+                        <span className="track-num">{track.index + 1}</span>
+                        <div className="track-main">
+                          <span className="track-title">
+                            {track.title}{' '}
+                            <span className="track-artist-inline">— {track.artist}</span>
+                          </span>
+                          <span className="track-artist">
+                            {(status === 'added' || status === 'low_confidence') &&
+                              rec?.matchedTitle && (
+                                <>
+                                  Guardada en YouTube Music como{' '}
+                                  <strong>{rec.matchedTitle}</strong>
+                                  {rec.matchedArtist ? ` · ${rec.matchedArtist}` : ''}
+                                </>
+                              )}
+                            {status === 'failed' &&
+                              'No se encontró coincidencia disponible en YouTube Music'}
+                            {(status === 'pending' || status === 'searching') &&
+                              'En espera para la siguiente sesión'}
+                          </span>
+                        </div>
+
+                        <div className="track-row-actions">
+                          {ytWatchUrl && (
+                            <a
+                              href={ytWatchUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="track-action-link"
+                            >
+                              Escuchar ↗
+                            </a>
+                          )}
+                          {status === 'failed' && (
+                            <a
+                              href={ytSearchUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="track-action-link"
+                            >
+                              Buscar ↗
+                            </a>
+                          )}
+                          <span className={`status-pill pill-${status}`}>
+                            {status === 'added' && '✓ Añadida'}
+                            {status === 'low_confidence' && '✓ Versión similar'}
+                            {status === 'failed' && 'No añadida'}
+                            {(status === 'pending' || status === 'searching') && 'Pendiente'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
 
