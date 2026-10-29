@@ -276,6 +276,11 @@ def create_stateless_ytmusic_client(cookie_or_json: str, user_agent: str | None 
     auth_dict["x-origin"] = origin
     auth_dict["origin"] = origin
 
+    # Evitar que ytmusicapi realice una petición GET adicional no autenticada a music.youtube.com
+    # en cada invocación serverless para buscar X-Goog-Visitor-Id
+    visitor_match = re.search(r"VISITOR_INFO1_LIVE=([^;\s]+)", cookie_line)
+    auth_dict["x-goog-visitor-id"] = visitor_match.group(1).strip() if visitor_match else ""
+
     return YTMusic(auth=auth_dict)
 
 

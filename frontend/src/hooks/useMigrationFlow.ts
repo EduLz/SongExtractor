@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import {
-  addTrackToYTMusicPlaylist,
+  addTracksBatchToYTMusicPlaylist,
   createYTMusicPlaylist,
   fetchSpotifyPlaylistPage,
   parseSpotifyPlaylistUrl,
   QuotaExceededError,
   searchYTMusicTrack,
+  SessionExpiredError,
   STORAGE_KEYS,
 } from '../lib/api';
 import {
@@ -31,6 +32,7 @@ export interface MigrationState {
   uploadState: UploadStateSession | null;
   isMigrating: boolean;
   isPaused: boolean;
+  needsCookieRefresh: boolean;
   currentTrackIndex: number | null;
   quotaExceededBanner: string | null;
   errorBanner: string | null;
@@ -57,6 +59,7 @@ type Action =
   | { type: 'SET_UPLOAD_STATE'; uploadState: UploadStateSession }
   | { type: 'START_MIGRATION' }
   | { type: 'PAUSE_MIGRATION' }
+  | { type: 'SET_COOKIE_EXPIRED'; message: string }
   | { type: 'FINISH_MIGRATION'; toSummary: boolean }
   | { type: 'SET_CURRENT_TRACK'; index: number | null }
   | { type: 'SET_QUOTA_BANNER'; message: string | null }
@@ -75,14 +78,17 @@ const initialState: MigrationState = {
   ytPlaylistTitle: '',
   ytPrivacy: 'PRIVATE',
   respectQuotaLimit: true,
-  delayMs: 800,
+  delayMs: 600,
   uploadState: null,
   isMigrating: false,
   isPaused: false,
+  needsCookieRefresh: false,
   currentTrackIndex: null,
   quotaExceededBanner: null,
   errorBanner: null,
 };
+
+const BATCH_SIZE = 15;
 
 function reducer(state: MigrationState, action: Action): MigrationState {
   switch (action.type) {
@@ -123,7 +129,12 @@ function reducer(state: MigrationState, action: Action): MigrationState {
       return { ...state, isExtracting: false, step: 'preview' };
     case 'SET_YT_COOKIE':
       sessionStorage.setItem(STORAGE_KEYS.YTMUSIC_COOKIE, action.cookie);
-      return { ...state, ytCookie: action.cookie, errorBanner: null };
+      return {
+        ...state,
+        ytCookie: action.cookie,
+        needsCookieRefresh: false,
+        errorBanner: null,
+      };
     case 'SET_YT_TITLE':
       return { ...state, ytPlaylistTitle: action.title };
     case 'SET_YT_PRIVACY':
@@ -131,7 +142,7 @@ function reducer(state: MigrationState, action: Action): MigrationState {
     case 'SET_RESPECT_QUOTA':
       return { ...state, respectQuotaLimit: action.value };
     case 'SET_DELAY_MS':
-      return { ...state, delayMs: Math.max(500, action.delayMs) };
+      return { ...state, delayMs: Math.max(400, action.delayMs) };
     case 'SET_UPLOAD_STATE':
       sessionStorage.setItem(STORAGE_KEYS.UPLOAD_STATE, JSON.stringify(action.uploadState));
       return { ...state, uploadState: action.uploadState };
@@ -141,11 +152,21 @@ function reducer(state: MigrationState, action: Action): MigrationState {
         step: 'migrate',
         isMigrating: true,
         isPaused: false,
+        needsCookieRefresh: false,
         errorBanner: null,
         quotaExceededBanner: null,
       };
     case 'PAUSE_MIGRATION':
       return { ...state, isMigrating: false, isPaused: true, currentTrackIndex: null };
+    case 'SET_COOKIE_EXPIRED':
+      return {
+        ...state,
+        isMigrating: false,
+        isPaused: true,
+        needsCookieRefresh: true,
+        currentTrackIndex: null,
+        errorBanner: action.message,
+      };
     case 'FINISH_MIGRATION':
       return {
         ...state,
@@ -182,7 +203,6 @@ export function useMigrationFlow() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const pauseRequestedRef = useRef(false);
 
-  // Hidratar estado previo si el usuario recarga la pestaña
   useEffect(() => {
     const storedCookie = sessionStorage.getItem(STORAGE_KEYS.YTMUSIC_COOKIE) || '';
     const hydrated: Partial<MigrationState> = {
@@ -203,7 +223,7 @@ export function useMigrationFlow() {
           hydrated.step = 'preview';
         }
       } catch {
-        // Ignorar caché corrupta
+        // Ignorar caché inválida
       }
     }
 
@@ -299,7 +319,6 @@ export function useMigrationFlow() {
         })
       );
 
-      // Sincronizar o crear estado de progreso en sessionStorage
       const existingStateRaw = sessionStorage.getItem(STORAGE_KEYS.UPLOAD_STATE);
       let upState: UploadStateSession | null = null;
       if (existingStateRaw) {
@@ -357,7 +376,7 @@ export function useMigrationFlow() {
       dispatch({
         type: 'SET_ERROR',
         message:
-          'Necesitas pegar tu credencial de sesión de YouTube Music para continuar. Haz clic en "¿Cómo consigo este dato?" para ver los pasos.',
+          'Necesitas pegar tu credencial de sesión de YouTube Music para continuar. Haz clic en "¿Cómo conecto mi cuenta?" para ver los pasos.',
       });
       return;
     }
@@ -398,59 +417,95 @@ export function useMigrationFlow() {
         pendingTracks = pendingTracks.slice(0, 190);
       }
 
-      for (const track of pendingTracks) {
+      // Procesar en lotes de BATCH_SIZE (15 canciones por inserción) para reducir
+      // un 95% las llamadas autenticadas a YouTube Music y evitar caducidad HTTP 401
+      for (let i = 0; i < pendingTracks.length; i += BATCH_SIZE) {
         if (pauseRequestedRef.current) {
           dispatch({ type: 'PAUSE_MIGRATION' });
           return;
         }
 
-        dispatch({ type: 'SET_CURRENT_TRACK', index: track.index });
-        currentState.track_records[track.index] = {
-          index: track.index,
-          trackKey: getTrackKey(track),
-          status: 'searching',
-        };
-        dispatch({ type: 'SET_UPLOAD_STATE', uploadState: { ...currentState } });
+        const chunk = pendingTracks.slice(i, i + BATCH_SIZE);
+        const matchedChunk: {
+          track: SpotifyTrack;
+          videoId: string;
+          matchedTitle: string;
+          matchedArtist: string;
+          confidence: number;
+          isLowConf: boolean;
+        }[] = [];
 
-        const searchRes = await searchYTMusicTrack({
-          cookie: state.ytCookie,
-          track,
-        });
+        // 1. Buscar cada canción del lote usando el catálogo público (sin consumir la cookie)
+        for (const track of chunk) {
+          if (pauseRequestedRef.current) {
+            break;
+          }
 
-        if (!searchRes.found || !searchRes.match) {
+          dispatch({ type: 'SET_CURRENT_TRACK', index: track.index });
           currentState.track_records[track.index] = {
             index: track.index,
             trackKey: getTrackKey(track),
-            status: 'failed',
-            errorReason: 'No disponible en YouTube Music',
+            status: 'searching',
           };
-          currentState.processed_indices.push(track.index);
-          currentState.processed_track_keys.push(getTrackKey(track));
-          currentState.updated_at = new Date().toISOString();
           dispatch({ type: 'SET_UPLOAD_STATE', uploadState: { ...currentState } });
-        } else {
-          await addTrackToYTMusicPlaylist({
+
+          const searchRes = await searchYTMusicTrack({ track });
+
+          if (!searchRes.found || !searchRes.match) {
+            currentState.track_records[track.index] = {
+              index: track.index,
+              trackKey: getTrackKey(track),
+              status: 'failed',
+              errorReason: 'No disponible en YouTube Music',
+            };
+            currentState.processed_indices.push(track.index);
+            currentState.processed_track_keys.push(getTrackKey(track));
+            currentState.updated_at = new Date().toISOString();
+            dispatch({ type: 'SET_UPLOAD_STATE', uploadState: { ...currentState } });
+          } else {
+            matchedChunk.push({
+              track,
+              videoId: searchRes.match.videoId,
+              matchedTitle: searchRes.match.title,
+              matchedArtist: searchRes.match.artist,
+              confidence: searchRes.confidence,
+              isLowConf: Boolean(searchRes.low_confidence || searchRes.confidence < 0.55),
+            });
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+
+        // 2. Añadir todas las canciones encontradas del lote en UNA SOLA llamada autenticada
+        if (matchedChunk.length > 0) {
+          await addTracksBatchToYTMusicPlaylist({
             cookie: state.ytCookie,
             playlistId: currentState.yt_playlist_id!,
-            videoId: searchRes.match.videoId,
+            videoIds: matchedChunk.map((m) => m.videoId),
           });
 
-          const isLowConf = Boolean(searchRes.low_confidence || searchRes.confidence < 0.55);
-          currentState.track_records[track.index] = {
-            index: track.index,
-            trackKey: getTrackKey(track),
-            status: isLowConf ? 'low_confidence' : 'added',
-            videoId: searchRes.match.videoId,
-            matchedTitle: searchRes.match.title,
-            matchedArtist: searchRes.match.artist,
-            confidence: searchRes.confidence,
-          };
-          currentState.processed_indices.push(track.index);
-          currentState.processed_track_keys.push(getTrackKey(track));
-          currentState.added_video_ids.push(searchRes.match.videoId);
-          currentState.estimated_quota_used += 50;
+          for (const item of matchedChunk) {
+            currentState.track_records[item.track.index] = {
+              index: item.track.index,
+              trackKey: getTrackKey(item.track),
+              status: item.isLowConf ? 'low_confidence' : 'added',
+              videoId: item.videoId,
+              matchedTitle: item.matchedTitle,
+              matchedArtist: item.matchedArtist,
+              confidence: item.confidence,
+            };
+            currentState.processed_indices.push(item.track.index);
+            currentState.processed_track_keys.push(getTrackKey(item.track));
+            currentState.added_video_ids.push(item.videoId);
+            currentState.estimated_quota_used += 50;
+          }
           currentState.updated_at = new Date().toISOString();
           dispatch({ type: 'SET_UPLOAD_STATE', uploadState: { ...currentState } });
+        }
+
+        if (pauseRequestedRef.current) {
+          dispatch({ type: 'PAUSE_MIGRATION' });
+          return;
         }
 
         await new Promise((resolve) => setTimeout(resolve, Math.max(500, state.delayMs)));
@@ -466,6 +521,13 @@ export function useMigrationFlow() {
         });
       }
     } catch (err) {
+      if (err instanceof SessionExpiredError) {
+        dispatch({
+          type: 'SET_COOKIE_EXPIRED',
+          message: err.message,
+        });
+        return;
+      }
       if (err instanceof QuotaExceededError) {
         dispatch({ type: 'PAUSE_MIGRATION' });
         dispatch({
@@ -519,7 +581,6 @@ export function useMigrationFlow() {
   const importUploadStateJson = useCallback((jsonText: string) => {
     try {
       const parsed = JSON.parse(jsonText);
-      // Soporta tanto el paquete completo (uploadState + tracks) como upload_state directo
       if (parsed?.uploadState && Array.isArray(parsed?.tracks) && parsed?.metadata) {
         sessionStorage.setItem(
           STORAGE_KEYS.EXTRACTED_PLAYLIST,

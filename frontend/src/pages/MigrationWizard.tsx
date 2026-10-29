@@ -559,6 +559,28 @@ export const MigrationWizard: React.FC = () => {
             </div>
 
             <div className="progress-card">
+              {state.needsCookieRefresh && (
+                <div className="alert-box alert-warning" style={{ marginBottom: '16px' }}>
+                  <div className="cookie-field-header" style={{ marginBottom: '8px' }}>
+                    <strong>Renovar Cookie de YouTube Music para continuar desde la canción {stats.processed + 1}:</strong>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setIsCookieModalOpen(true)}
+                    >
+                      Ver pasos (F12 → browse)
+                    </button>
+                  </div>
+                  <textarea
+                    rows={3}
+                    className="text-input code-textarea"
+                    placeholder="Pega aquí la Cookie actualizada desde tu pestaña de YouTube Music y pulsa ▶ Continuar arriba"
+                    value={state.ytCookie}
+                    onChange={(e) => dispatch({ type: 'SET_YT_COOKIE', cookie: e.target.value })}
+                  />
+                </div>
+              )}
+
               <div className="progress-stats-row">
                 <span>
                   Avance: <strong>{stats.processed.toLocaleString()}</strong> de{' '}

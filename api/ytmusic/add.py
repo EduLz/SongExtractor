@@ -1,5 +1,5 @@
 """
-POST /api/ytmusic/add - Creación de playlist y adición de canciones sin estado en YouTube Music.
+POST /api/ytmusic/add - Creación de playlist y adición de canciones (individual o por lotes) en YouTube Music.
 """
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import time
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException
@@ -37,12 +38,13 @@ class YTMusicAddRequest(BaseModel):
         default=None,
         description="Cadena de cabecera Cookie o JSON de browser.json de YouTube Music",
     )
-    action: Literal["create_playlist", "add_item"] = Field(
+    action: Literal["create_playlist", "add_item", "add_batch"] = Field(
         default="add_item",
-        description="Acción a ejecutar: crear playlist o añadir canción",
+        description="Acción a ejecutar: crear playlist, añadir 1 canción o añadir un lote",
     )
     playlist_id: str | None = Field(default=None, description="ID de la playlist en YouTube Music")
-    video_id: str | None = Field(default=None, description="videoId de la canción a añadir")
+    video_id: str | None = Field(default=None, description="videoId individual a añadir")
+    video_ids: list[str] | None = Field(default=None, description="Lista de videoIds para inserción por lotes")
     title: str | None = Field(default=None, description="Título para crear una nueva playlist")
     description: str | None = Field(default="", description="Descripción de la nueva playlist")
     privacy_status: Literal["PRIVATE", "PUBLIC", "UNLISTED"] = Field(default="PRIVATE")
@@ -53,6 +55,16 @@ def _clean_yt_text(value: str, max_len: int = 150) -> str:
     return cleaned[:max_len]
 
 
+def _is_unauthorized_session_error(exc: Exception | str) -> bool:
+    msg = str(exc).lower()
+    return (
+        "http 401" in msg
+        or "401: unauthorized" in msg
+        or "not authorized to edit this playlist" in msg
+        or "unauthenticated" in msg
+    )
+
+
 @app.post("/")
 @app.post("/api/ytmusic/add")
 def add_to_ytmusic_playlist(
@@ -60,14 +72,14 @@ def add_to_ytmusic_playlist(
     x_ytmusic_cookie: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """
-    Crea una nueva playlist o añade un videoId a una playlist existente en YouTube Music
-    sin almacenar credenciales ni estado en el servidor.
+    Crea una nueva playlist o añade uno o varios videoIds a una playlist existente
+    en YouTube Music sin almacenar credenciales ni estado en el servidor.
     """
     cookie_raw = (payload.cookie or x_ytmusic_cookie or "").strip()
     if not cookie_raw:
         raise HTTPException(
             status_code=400,
-            detail="Falta la cookie de sesión de YouTube Music (browser.json).",
+            detail="Falta la credencial de sesión de YouTube Music (Cookie).",
         )
 
     try:
@@ -83,8 +95,8 @@ def add_to_ytmusic_playlist(
 
     try:
         if payload.action == "create_playlist":
-            title = _clean_yt_text(payload.title or "Spotify Migrated Playlist", 150)
-            desc = _clean_yt_text(payload.description or "Migrada con SongExtractor", 400)
+            title = _clean_yt_text(payload.title or "Playlist de Spotify", 150)
+            desc = _clean_yt_text(payload.description or "Transferida con SongExtractor", 400)
             playlist_id = yt.create_playlist(
                 title=title,
                 description=desc,
@@ -96,12 +108,12 @@ def add_to_ytmusic_playlist(
                         status_code=403,
                         detail={
                             "code": "QUOTA_EXCEEDED",
-                            "message": "Cuota de YouTube agotada al intentar crear la playlist (403 quotaExceeded).",
+                            "message": "Límite diario de YouTube alcanzado al crear la playlist.",
                         },
                     )
                 raise HTTPException(
                     status_code=502,
-                    detail=f"YouTube Music no devolvió un ID de playlist válido: {playlist_id}",
+                    detail=f"YouTube Music no devolvió un identificador de playlist válido: {playlist_id}",
                 )
             return {
                 "status": "created",
@@ -110,18 +122,40 @@ def add_to_ytmusic_playlist(
                 "quota_cost": 50,
             }
 
-        # Acción por defecto: add_item
-        if not payload.playlist_id or not payload.video_id:
+        # Inserción individual o por lotes (reduce las llamadas autenticadas hasta un 95%)
+        ids_to_add: list[str] = []
+        if payload.video_ids:
+            ids_to_add = [v.strip() for v in payload.video_ids if v and v.strip()]
+        elif payload.video_id and payload.video_id.strip():
+            ids_to_add = [payload.video_id.strip()]
+
+        if not payload.playlist_id or not ids_to_add:
             raise HTTPException(
                 status_code=400,
-                detail="Se requieren 'playlist_id' y 'video_id' para añadir una canción.",
+                detail="Se requieren 'playlist_id' y al menos un 'video_id' para añadir canciones.",
             )
 
-        add_result = yt.add_playlist_items(
-            playlistId=payload.playlist_id.strip(),
-            videoIds=[payload.video_id.strip()],
-            duplicates=False,
-        )
+        last_exc: Exception | None = None
+        add_result: Any = None
+        for attempt in range(1, 3):
+            try:
+                if attempt > 1:
+                    time.sleep(1.2)
+                    yt = create_stateless_ytmusic_client(cookie_raw)
+                add_result = yt.add_playlist_items(
+                    playlistId=payload.playlist_id.strip(),
+                    videoIds=ids_to_add,
+                    duplicates=True,
+                )
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if is_quota_exceeded_error(exc):
+                    break
+
+        if last_exc is not None:
+            raise last_exc
 
         if isinstance(add_result, dict):
             status_val = str(add_result.get("status") or "")
@@ -132,29 +166,40 @@ def add_to_ytmusic_playlist(
                         status_code=403,
                         detail={
                             "code": "QUOTA_EXCEEDED",
-                            "message": "Se agotó la cuota diaria de YouTube (403 quotaExceeded). Reanuda mañana.",
+                            "message": "Se alcanzó el límite diario de YouTube. Continúa mañana.",
                         },
                     )
 
         return {
             "status": "added",
             "playlist_id": payload.playlist_id,
-            "video_id": payload.video_id,
-            "quota_cost": 50,
+            "video_ids": ids_to_add,
+            "added_count": len(ids_to_add),
+            "quota_cost": 50 * len(ids_to_add),
         }
 
     except HTTPException:
         raise
     except Exception as exc:
         clean_err = sanitize_error_message(str(exc), [cookie_raw])
+        if _is_unauthorized_session_error(exc):
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Tu sesión temporal de YouTube Music caducó (Google rota la cookie de seguridad "
+                    "tras varias peticiones o si se cierra la ventana de incógnito). "
+                    "Tus canciones ya añadidas están a salvo: vuelve a copiar la Cookie actual desde "
+                    "music.youtube.com (F12 → Red → browse), pégala abajo y pulsa Continuar."
+                ),
+            ) from None
         if is_quota_exceeded_error(exc):
             raise HTTPException(
                 status_code=403,
                 detail={
                     "code": "QUOTA_EXCEEDED",
                     "message": (
-                        "Cuota diaria de YouTube agotada (HTTP 403 quotaExceeded). "
-                        "Tu progreso está guardado en el navegador para continuar en la próxima sesión."
+                        "Límite diario de YouTube alcanzado. "
+                        "Tu avance está guardado en el navegador para continuar mañana."
                     ),
                 },
             ) from None
@@ -162,4 +207,3 @@ def add_to_ytmusic_playlist(
             status_code=502,
             detail=f"Error al operar en YouTube Music: {clean_err}",
         ) from None
-

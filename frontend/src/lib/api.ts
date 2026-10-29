@@ -52,6 +52,13 @@ export class QuotaExceededError extends Error {
   }
 }
 
+export class SessionExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionExpiredError';
+  }
+}
+
 async function parseErrorDetail(resp: Response): Promise<string> {
   try {
     const data = await resp.json();
@@ -102,7 +109,6 @@ export async function fetchSpotifyPlaylistPage(params: {
 }
 
 export async function searchYTMusicTrack(params: {
-  cookie: string;
   track: SpotifyTrack;
 }): Promise<{
   found: boolean;
@@ -121,7 +127,6 @@ export async function searchYTMusicTrack(params: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      cookie: params.cookie,
       title: params.track.title,
       artist: params.track.artist,
       album: params.track.album,
@@ -162,6 +167,9 @@ export async function createYTMusicPlaylist(params: {
     }),
   });
 
+  if (resp.status === 401) {
+    throw new SessionExpiredError(await parseErrorDetail(resp));
+  }
   if (resp.status === 403) {
     throw new QuotaExceededError(await parseErrorDetail(resp));
   }
@@ -171,14 +179,15 @@ export async function createYTMusicPlaylist(params: {
   return resp.json();
 }
 
-export async function addTrackToYTMusicPlaylist(params: {
+export async function addTracksBatchToYTMusicPlaylist(params: {
   cookie: string;
   playlistId: string;
-  videoId: string;
+  videoIds: string[];
 }): Promise<{
   status: string;
   playlist_id: string;
-  video_id: string;
+  video_ids: string[];
+  added_count: number;
   quota_cost: number;
 }> {
   const resp = await fetch('/api/ytmusic/add', {
@@ -186,12 +195,15 @@ export async function addTrackToYTMusicPlaylist(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       cookie: params.cookie,
-      action: 'add_item',
+      action: 'add_batch',
       playlist_id: params.playlistId,
-      video_id: params.videoId,
+      video_ids: params.videoIds,
     }),
   });
 
+  if (resp.status === 401) {
+    throw new SessionExpiredError(await parseErrorDetail(resp));
+  }
   if (resp.status === 403) {
     throw new QuotaExceededError(await parseErrorDetail(resp));
   }

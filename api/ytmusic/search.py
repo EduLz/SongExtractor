@@ -1,5 +1,9 @@
 """
 POST /api/ytmusic/search - Búsqueda sin estado de canciones en YouTube Music.
+
+Utiliza el cliente público de YTMusic (sin enviar la cookie de sesión del usuario)
+para evitar que Google invalide o rote prematuramente la cookie (__Secure-1PSIDTS)
+por exceso de peticiones autenticadas durante la búsqueda del catálogo.
 """
 
 from __future__ import annotations
@@ -11,13 +15,13 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from ytmusicapi import YTMusic
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from api._shared import (  # noqa: E402
-    create_stateless_ytmusic_client,
     is_quota_exceeded_error,
     sanitize_error_message,
     score_yt_candidate,
@@ -35,7 +39,7 @@ app.add_middleware(
 class YTMusicSearchRequest(BaseModel):
     cookie: str | None = Field(
         default=None,
-        description="Cadena de cabecera Cookie o JSON de browser.json de YouTube Music",
+        description="Opcional: la búsqueda usa el catálogo público para proteger la sesión del usuario",
     )
     title: str = Field(..., min_length=1, description="Título de la canción")
     artist: str = Field(default="", description="Artista principal")
@@ -51,25 +55,18 @@ def search_ytmusic_track(
     x_ytmusic_cookie: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """
-    Realiza la búsqueda de una canción en YouTube Music totalmente en memoria y
-    devuelve el mejor resultado junto con su puntuación de confianza.
+    Busca una canción en el catálogo de YouTube Music sin consumir ni exponer la
+    sesión autenticada del usuario, evitando bloqueos HTTP 401 por uso automatizado.
     """
     cookie_raw = (payload.cookie or x_ytmusic_cookie or "").strip()
-    if not cookie_raw:
-        raise HTTPException(
-            status_code=400,
-            detail="Falta la cookie de sesión de YouTube Music (browser.json).",
-        )
 
     try:
-        yt = create_stateless_ytmusic_client(cookie_raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        yt = YTMusic()
     except Exception as exc:
-        clean_err = sanitize_error_message(str(exc), [cookie_raw])
+        clean_err = sanitize_error_message(str(exc), [cookie_raw] if cookie_raw else None)
         raise HTTPException(
-            status_code=400,
-            detail=f"No se pudo inicializar la sesión de YouTube Music: {clean_err}",
+            status_code=502,
+            detail=f"No se pudo inicializar el buscador de YouTube Music: {clean_err}",
         ) from None
 
     query = f"{payload.title} {payload.artist}".strip()
@@ -79,15 +76,15 @@ def search_ytmusic_track(
         if not results:
             results = yt.search(query, filter="videos")
     except Exception as exc:
-        clean_err = sanitize_error_message(str(exc), [cookie_raw])
+        clean_err = sanitize_error_message(str(exc), [cookie_raw] if cookie_raw else None)
         if is_quota_exceeded_error(exc):
             raise HTTPException(
                 status_code=403,
                 detail={
                     "code": "QUOTA_EXCEEDED",
                     "message": (
-                        "Se ha alcanzado el límite de cuota o tasa de YouTube Music (403 quotaExceeded). "
-                        "El estado está guardado en tu navegador; puedes reanudar en la siguiente sesión."
+                        "Se ha alcanzado el límite diario de peticiones de YouTube Music. "
+                        "Tu avance está guardado; puedes continuar mañana."
                     ),
                 },
             ) from None
@@ -149,4 +146,3 @@ def search_ytmusic_track(
         "low_confidence": best_conf < 0.55,
         "match": best_item,
     }
-
