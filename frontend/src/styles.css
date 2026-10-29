@@ -382,6 +382,12 @@ kbd,
   resize: vertical;
 }
 
+.field-hint {
+  margin: -6px 0 4px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .checkbox-row {
   display: flex;
   align-items: center;

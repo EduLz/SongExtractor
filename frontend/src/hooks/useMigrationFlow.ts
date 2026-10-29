@@ -65,6 +65,7 @@ type Action =
   | { type: 'SET_QUOTA_BANNER'; message: string | null }
   | { type: 'SET_ERROR'; message: string | null }
   | { type: 'HYDRATE_SESSION'; partial: Partial<MigrationState> }
+  | { type: 'RESET_UPLOAD_PROGRESS' }
   | { type: 'RESET_ALL' };
 
 const initialState: MigrationState = {
@@ -89,6 +90,54 @@ const initialState: MigrationState = {
 };
 
 const BATCH_SIZE = 15;
+
+function getCookieAccountFingerprint(rawCookie: string): string | null {
+  const text = (rawCookie || '').trim();
+  if (!text) return null;
+  const loginInfo = text.match(/LOGIN_INFO=([^;\s]+)/i)?.[1] || '';
+  const sid = text.match(/(?:^|;\s*)SID=([^;\s]+)/i)?.[1] || '';
+  const sapisid = text.match(/__Secure-3PAPISID=([^;\s]+)/i)?.[1] || '';
+  const authUser = text.match(/x-goog-authuser:\s*(\d+)/i)?.[1] || '0';
+  if (!loginInfo && !sid && !sapisid) return null;
+  return `${loginInfo.slice(0, 32)}|${sid.slice(0, 24)}|${sapisid.slice(0, 24)}|u=${authUser}`;
+}
+
+function buildFreshUploadState(
+  tracks: SpotifyTrack[],
+  playlistId: string,
+  playlistUrl: string,
+  playlistName: string,
+  ytTitle: string,
+  ytPrivacy: 'PRIVATE' | 'PUBLIC' | 'UNLISTED',
+  accountFingerprint: string | null = null
+): UploadStateSession {
+  const nowIso = new Date().toISOString();
+  const records: Record<number, TrackMigrationRecord> = {};
+  tracks.forEach((t) => {
+    records[t.index] = {
+      index: t.index,
+      trackKey: getTrackKey(t),
+      status: 'pending',
+    };
+  });
+  return {
+    source_playlist_id: playlistId,
+    source_playlist_url: playlistUrl,
+    source_playlist_name: playlistName,
+    yt_playlist_id: null,
+    yt_playlist_title: ytTitle || playlistName,
+    yt_privacy: ytPrivacy,
+    account_fingerprint: accountFingerprint,
+    created_at: nowIso,
+    updated_at: nowIso,
+    total_tracks_in_source: tracks.length,
+    processed_indices: [],
+    processed_track_keys: [],
+    added_video_ids: [],
+    track_records: records,
+    estimated_quota_used: 0,
+  };
+}
 
 function reducer(state: MigrationState, action: Action): MigrationState {
   switch (action.type) {
@@ -127,14 +176,42 @@ function reducer(state: MigrationState, action: Action): MigrationState {
       };
     case 'FINISH_EXTRACTION':
       return { ...state, isExtracting: false, step: 'preview' };
-    case 'SET_YT_COOKIE':
+    case 'SET_YT_COOKIE': {
       sessionStorage.setItem(STORAGE_KEYS.YTMUSIC_COOKIE, action.cookie);
+      const newFp = getCookieAccountFingerprint(action.cookie);
+      const prevFp = state.uploadState?.account_fingerprint || null;
+
+      // Si el usuario cambia la Cookie en el Paso 3 (ytconfig) por la de otra cuenta distinta,
+      // reiniciamos el destino para que cree la playlist en la nueva cuenta y no reutilice la anterior.
+      let updatedUploadState = state.uploadState;
+      if (
+        state.step === 'ytconfig' &&
+        state.uploadState &&
+        state.metadata &&
+        newFp &&
+        prevFp &&
+        newFp !== prevFp
+      ) {
+        updatedUploadState = buildFreshUploadState(
+          state.tracks,
+          state.metadata.playlist_id,
+          state.playlistUrl.trim(),
+          state.metadata.name,
+          state.ytPlaylistTitle || state.metadata.name,
+          state.ytPrivacy,
+          newFp
+        );
+        sessionStorage.setItem(STORAGE_KEYS.UPLOAD_STATE, JSON.stringify(updatedUploadState));
+      }
+
       return {
         ...state,
         ytCookie: action.cookie,
+        uploadState: updatedUploadState,
         needsCookieRefresh: false,
         errorBanner: null,
       };
+    }
     case 'SET_YT_TITLE':
       return { ...state, ytPlaylistTitle: action.title };
     case 'SET_YT_PRIVACY':
@@ -183,6 +260,29 @@ function reducer(state: MigrationState, action: Action): MigrationState {
       return { ...state, errorBanner: action.message, isExtracting: false };
     case 'HYDRATE_SESSION':
       return { ...state, ...action.partial };
+    case 'RESET_UPLOAD_PROGRESS': {
+      if (!state.metadata) return state;
+      const fresh = buildFreshUploadState(
+        state.tracks,
+        state.metadata.playlist_id,
+        state.playlistUrl.trim(),
+        state.metadata.name,
+        state.ytPlaylistTitle || state.metadata.name,
+        state.ytPrivacy,
+        getCookieAccountFingerprint(state.ytCookie)
+      );
+      sessionStorage.setItem(STORAGE_KEYS.UPLOAD_STATE, JSON.stringify(fresh));
+      return {
+        ...state,
+        uploadState: fresh,
+        isMigrating: false,
+        isPaused: false,
+        needsCookieRefresh: false,
+        currentTrackIndex: null,
+        quotaExceededBanner: null,
+        errorBanner: null,
+      };
+    }
     case 'RESET_ALL':
       sessionStorage.removeItem(STORAGE_KEYS.UPLOAD_STATE);
       sessionStorage.removeItem(STORAGE_KEYS.EXTRACTED_PLAYLIST);
@@ -391,10 +491,35 @@ export function useMigrationFlow() {
     pauseRequestedRef.current = false;
     dispatch({ type: 'START_MIGRATION' });
 
-    const currentState: UploadStateSession = JSON.parse(JSON.stringify(state.uploadState));
+    const currentFp = getCookieAccountFingerprint(state.ytCookie);
+    let currentState: UploadStateSession = JSON.parse(JSON.stringify(state.uploadState));
+
+    // Si estamos iniciando desde el Paso 3 y la Cookie pertenece a una cuenta distinta a la que creó
+    // la playlist anterior, o si ya se había completado el 100% en otra sesión, creamos una nueva playlist.
+    if (
+      state.step === 'ytconfig' &&
+      currentState.yt_playlist_id &&
+      currentState.account_fingerprint &&
+      currentFp &&
+      currentState.account_fingerprint !== currentFp
+    ) {
+      currentState = buildFreshUploadState(
+        state.tracks,
+        currentState.source_playlist_id,
+        currentState.source_playlist_url,
+        currentState.source_playlist_name,
+        state.ytPlaylistTitle.trim() || currentState.source_playlist_name,
+        state.ytPrivacy,
+        currentFp
+      );
+    }
+
     currentState.yt_playlist_title =
       state.ytPlaylistTitle.trim() || currentState.source_playlist_name;
     currentState.yt_privacy = state.ytPrivacy;
+    if (currentFp) {
+      currentState.account_fingerprint = currentFp;
+    }
 
     try {
       if (!currentState.yt_playlist_id) {
@@ -405,6 +530,7 @@ export function useMigrationFlow() {
           privacyStatus: currentState.yt_privacy,
         });
         currentState.yt_playlist_id = created.playlist_id;
+        currentState.account_fingerprint = currentFp;
         currentState.estimated_quota_used += created.quota_cost || 50;
         currentState.updated_at = new Date().toISOString();
         dispatch({ type: 'SET_UPLOAD_STATE', uploadState: { ...currentState } });

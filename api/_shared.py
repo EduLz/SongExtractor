@@ -226,6 +226,44 @@ def _extract_sapisid(cookie_str: str) -> str:
     )
 
 
+def _extract_authuser_and_pageid(raw_input: str) -> tuple[str, str | None]:
+    """
+    Extrae X-Goog-AuthUser (por defecto '0') y X-Goog-PageId si el usuario pegó
+    el bloque de cabeceras de red o un JSON con múltiples cuentas activas.
+    """
+    auth_user = "0"
+    page_id: str | None = None
+    text = raw_input.strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    low_k = k.lower()
+                    if low_k == "x-goog-authuser" and str(v).strip().isdigit():
+                        auth_user = str(v).strip()
+                    elif low_k == "x-goog-pageid" and str(v).strip():
+                        page_id = str(v).strip()
+        except Exception:
+            pass
+        return auth_user, page_id
+
+    for ln in text.splitlines():
+        clean = ln.strip()
+        low = clean.lower()
+        if low.startswith("x-goog-authuser:"):
+            val = clean.split(":", 1)[1].strip()
+            if val.isdigit():
+                auth_user = val
+        elif low.startswith("x-goog-pageid:"):
+            val = clean.split(":", 1)[1].strip()
+            if val:
+                page_id = val
+
+    return auth_user, page_id
+
+
 def create_stateless_ytmusic_client(cookie_or_json: str, user_agent: str | None = None) -> YTMusic:
     """
     Construye una instancia de YTMusic 100% en memoria (sin escribir archivos en el servidor)
@@ -239,6 +277,7 @@ def create_stateless_ytmusic_client(cookie_or_json: str, user_agent: str | None 
     raw = cookie_or_json.strip()
     ua = (user_agent or DEFAULT_USER_AGENT).strip()
     cookie_line = ""
+    auth_user, page_id = _extract_authuser_and_pageid(raw)
 
     if raw.startswith("{") and raw.endswith("}"):
         try:
@@ -265,7 +304,7 @@ def create_stateless_ytmusic_client(cookie_or_json: str, user_agent: str | None 
         f"Accept-Language: es-ES,es;q=0.9,en;q=0.8\n"
         f"Authorization: {auth_header}\n"
         f"Content-Type: application/json\n"
-        f"X-Goog-AuthUser: 0\n"
+        f"X-Goog-AuthUser: {auth_user}\n"
         f"x-origin: {origin}\n"
         f"User-Agent: {ua}\n"
         f"Cookie: {cookie_line}\n"
@@ -273,6 +312,9 @@ def create_stateless_ytmusic_client(cookie_or_json: str, user_agent: str | None 
     auth_json_str = setup_browser(filepath=None, headers_raw=headers_raw)
     auth_dict = json.loads(auth_json_str)
     auth_dict["authorization"] = auth_header
+    auth_dict["x-goog-authuser"] = auth_user
+    if page_id:
+        auth_dict["x-goog-pageid"] = page_id
     auth_dict["x-origin"] = origin
     auth_dict["origin"] = origin
 

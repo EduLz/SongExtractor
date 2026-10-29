@@ -482,6 +482,12 @@ export const MigrationWizard: React.FC = () => {
                 value={state.ytCookie}
                 onChange={(e) => dispatch({ type: 'SET_YT_COOKIE', cookie: e.target.value })}
               />
+              <p className="field-hint">
+                <strong>¿Quieres usar otra cuenta de Google?</strong> Cierra por completo la ventana
+                de incógnito anterior y abre una nueva antes de iniciar sesión (si cambias de cuenta
+                dentro de la misma ventana, el navegador sigue enviando la Cookie de la primera
+                cuenta).
+              </p>
 
               <div className="options-box">
                 <label className="checkbox-row">
@@ -509,6 +515,13 @@ export const MigrationWizard: React.FC = () => {
                     </span>
                   </div>
                   <div className="resume-actions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => dispatch({ type: 'RESET_UPLOAD_PROGRESS' })}
+                    >
+                      Empezar desde cero (otra cuenta)
+                    </button>
                     <button
                       type="button"
                       className="btn btn-secondary"

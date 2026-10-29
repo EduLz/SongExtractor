@@ -47,6 +47,7 @@ export interface UploadStateSession {
   yt_playlist_id: string | null;
   yt_playlist_title: string;
   yt_privacy: 'PRIVATE' | 'PUBLIC' | 'UNLISTED';
+  account_fingerprint?: string | null;
   created_at: string;
   updated_at: string;
   total_tracks_in_source: number;

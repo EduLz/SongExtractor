@@ -61,8 +61,10 @@ export const CookieHelpModal: React.FC<CookieHelpModalProps> = ({ isOpen, onClos
           </ol>
 
           <div className="alert-box alert-warning">
-            <strong>Consejo de privacidad:</strong> Cuando termines de pasar tu playlist, cierra la
-            sesión en esa ventana de incógnito y listo.
+            <strong>Importante si usas varias cuentas:</strong> Si quieres pasar una playlist a otra
+            cuenta distinta, <strong>cierra todas las ventanas de incógnito abiertas</strong> y abre
+            una nueva desde cero. Si inicias sesión con dos cuentas en la misma ventana, Google
+            guarda las playlists en la primera cuenta que abriste.
           </div>
         </div>
 
